@@ -1,0 +1,59 @@
+﻿#前製作業 將資料夾丟到cloudera桌面 並且 
+cd ~/Desktop/cast_MR
+
+#第一步 在SQL server裡create一個view 裡面包含1808部電影的前三個演員和第一週票房和上映年
+create view information
+AS
+SELECT   DISTINCT w.pkno, ROUND(LOG (w.weekendgross), 5) AS gross, ca.priority4c AS sort, ca.cast, w.year
+FROM     dbo.convHistRateByYear AS b INNER JOIN
+                   (SELECT  pkno
+                   FROM     dbo.boxoffice
+                   GROUP BY pkno
+                   HAVING  (SUM(weekendgross) >= 300000)) AS s ON b.pkno = s.pkno INNER JOIN
+                   (SELECT  pkno, title, weekendgross, CONVERT(char(4), date) AS year
+                   FROM     dbo.boxoffice
+                   WHERE   (weekend = 1)) AS w ON s.pkno = w.pkno INNER JOIN
+               dbo.cast_pri AS ca ON b.pkno = ca.pkno
+WHERE   (0 < ca.priority4c) AND (4 > ca.priority4c)
+
+
+#第二步 將view丟進hdfs裡面
+sqoop import --connect "jdbc:sqlserver://10.120.28.6:1433;username=sa;password=passw0rd;database=IMDB" --table information -m 1
+
+#第三步 做一個所有演員在2004~2014年的電影票房的表(用"-"隔開)
+hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar \
+-files ./map.py,./reduce.py \
+-input information/part* \
+-output cast_step1 \
+-mapper map.py \
+-reducer reduce.py
+
+
+#第四步 將演員當年度票房為0的地方用前一年的票房補上
+hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar \
+-files ./mapsort.py \
+-input cast_step1/part* \
+-output cast_step2 \
+-mapper mapsort.py \
+-numReduceTasks 0
+
+#第五步 將演員票房表丟到本機端並建成一個table.txt的檔案
+hadoop fs -copyToLocal cast_step2/ cast_table
+cat cast_table/part* > table.txt
+
+#第六步 將1808部電影的三個演員權重算出來(用"-"隔開)
+hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar \
+-files ./weight_map.py,./weight_reduce.py,./table.txt \
+-input information/part* \
+-output cast_step3 \
+-mapper weight_map.py \
+-reducer weight_reduce.py
+
+#如果MR執行失敗請先刪掉當時output的路徑
+hadoop fs -rm -r cast_step3(路徑名)
+
+#看結果囉~~~~
+hadoop fs -cat cast_step3/part-00000
+
+#本機試跑
+cat input_filename.txt | python map_name.py |sort | python reduce_name.py
